@@ -1,64 +1,60 @@
 import streamlit as st
 import pandas as pd
+import easyocr
 import cv2
 import numpy as np
 from PIL import Image
 from io import BytesIO
-import easyocr
 
-# ✅ Initialize EasyOCR reader once (English)
-reader = easyocr.Reader(['en'], gpu=False)
+# Initialize EasyOCR (Dutch + English)
+reader = easyocr.Reader(['nl', 'en'], gpu=False)
 
-st.set_page_config(page_title="PostNL Cart Tracker", layout="wide")
-st.title("📦 PostNL Cart Tracker (Cloud-Optimized Version)")
+st.set_page_config(page_title="PostNL Cart Tracker (Form Version)", layout="wide")
+st.title("📦 PostNL Cart Tracker – Form Template Version")
 
-st.markdown("""
-✅ **Cloud-Optimized Version**  
-- Better OCR with preprocessing.  
-- Detects **multiple carts per photo**.  
-- Improved **day color detection**.  
-- Works on **Streamlit Cloud & iPhone**.  
+st.write("""
+✅ **Optimized for your official PostNL Form**  
+- Better OCR accuracy with preprocessing.  
+- Auto-fills the same columns as the printed form.  
+- Exports to Excel in the official layout.  
 """)
 
-# ✅ Day Color Mapping
+# Day color reference
 DAY_COLORS = {
-    "Sunday": (150, 75, 0),      
-    "Monday": (0, 128, 0),       
-    "Tuesday": (128, 128, 128),  
-    "Wednesday": (255, 255, 0),  
-    "Thursday": (255, 0, 0),     
-    "Friday": (0, 0, 255),       
-    "Saturday": (255, 165, 0)    
+    "Sunday": (150, 75, 0),      # Brown
+    "Monday": (0, 128, 0),       # Green
+    "Tuesday": (128, 128, 128),  # Grey
+    "Wednesday": (255, 255, 0),  # Yellow
+    "Thursday": (255, 0, 0),     # Red
+    "Friday": (0, 0, 255),       # Blue
+    "Saturday": (255, 165, 0)    # Orange
 }
 
 def preprocess_image(image):
-    """Resize, grayscale, and sharpen image for better OCR."""
+    """Convert to grayscale + threshold to improve OCR."""
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    img = cv2.resize(img, (0, 0), fx=1.5, fy=1.5)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 11, 17, 17)
-    return gray
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    return thresh
 
 def detect_day_from_color(image):
-    """Improved day detection based on color averaging."""
+    """Detect day based on card color."""
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     avg_color = img.mean(axis=(0, 1))[::-1]  # RGB
-
     closest_day, min_dist = None, float("inf")
     for day, color in DAY_COLORS.items():
         dist = np.linalg.norm(np.array(avg_color) - np.array(color))
         if dist < min_dist:
-            closest_day, min_dist = day, dist
+            min_dist, closest_day = dist, day
     return closest_day
 
-def extract_text_easyocr(image):
-    """Extract text using EasyOCR with preprocessing."""
-    processed = preprocess_image(image)
-    results = reader.readtext(processed, detail=0)
-    return " ".join(results).upper()
+def extract_text(image):
+    """OCR with EasyOCR."""
+    result = reader.readtext(preprocess_image(image), detail=0, paragraph=True)
+    return " ".join(result).upper()
 
 def parse_type_category(text):
-    """Extract Type & Category from OCR text."""
+    """Map text to Type and Category."""
     if "MIX" in text:
         t_type = "Mixed Post"
     elif "LIST" in text:
@@ -66,24 +62,18 @@ def parse_type_category(text):
     else:
         t_type = "Gerichte Landen"
 
-    categories = ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC"]
-    t_category = next((c for c in categories if c in text), "-")
+    categories = ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC", "GRZAMRX", "RC"]
+    t_category = next((cat for cat in categories if cat in text), "-")
     return t_type, t_category
 
-def convert_df_to_excel(dataframe):
-    """Export DataFrame to Excel (auto-download)."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        dataframe.to_excel(writer, index=False, sheet_name="Cart Summary")
-    return output.getvalue()
-
 uploaded_files = st.file_uploader("Upload cart photos:", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+
 results = []
 
 if uploaded_files:
     for file in uploaded_files:
         image = Image.open(file)
-        ocr_text = extract_text_easyocr(image)
+        ocr_text = extract_text(image)
         detected_day = detect_day_from_color(image)
         t_type, t_category = parse_type_category(ocr_text)
 
@@ -94,19 +84,30 @@ if uploaded_files:
             key=file.name
         )
 
-        results.append({"Type": t_type, "Category": t_category, "Day": manual_day, "Count": 1})
+        results.append({
+            "Voorraad startproduct": t_type,
+            "RC": t_category,
+            "P1ats": manual_day,
+            "Opmerkingen": ""
+        })
 
-    df = pd.DataFrame(results).groupby(["Type", "Category", "Day"], as_index=False)["Count"].sum()
+    df = pd.DataFrame(results)
 
-    st.subheader("📊 Cart Summary Table")
+    st.subheader("📊 PostNL Form Table")
     st.dataframe(df, use_container_width=True)
+
+    def convert_df_to_excel(dataframe):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            dataframe.to_excel(writer, index=False, sheet_name="PostNL Form")
+        return output.getvalue()
 
     excel_data = convert_df_to_excel(df)
     st.download_button(
-        label="⬇️ Download Excel Report",
+        label="⬇️ Download PostNL Form Excel",
         data=excel_data,
-        file_name="postnl_cart_summary.xlsx",
+        file_name="postnl_form.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    st.success("✅ Report ready!")
+    st.success("✅ Form Ready!")
