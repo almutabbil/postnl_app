@@ -1,113 +1,95 @@
 import streamlit as st
 import pandas as pd
 import cv2
+import easyocr
 import numpy as np
 from PIL import Image
-from io import BytesIO
-import easyocr
 from ultralytics import YOLO
 import os
 
-# ✅ Initialize OCR and YOLO once
-reader = easyocr.Reader(['en'], gpu=False)
-model = YOLO("yolov8n.pt")  # Small YOLOv8 pre-trained model
+# =============================
+# 1. SETUP
+# =============================
 
-# ✅ Day color mapping (fine-tune if needed)
-DAY_COLORS = {
-    "Sunday": (150, 75, 0),
-    "Monday": (0, 128, 0),
-    "Tuesday": (128, 128, 128),
-    "Wednesday": (255, 255, 0),
-    "Thursday": (255, 0, 0),
-    "Friday": (0, 0, 255),
-    "Saturday": (255, 165, 0)
-}
+# Load YOLOv8 model for cart detection (trained on carts or general objects)
+MODEL_PATH = "yolov8n.pt"  # Using the small model to ensure Streamlit Cloud compatibility
+model = YOLO(MODEL_PATH)
 
-# ✅ OCR Categories Reference
-CATEGORIES = ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC", "PNLI", "GRX", "MRX", "Gateway"]
+# EasyOCR reader for text/category extraction
+reader = easyocr.Reader(['en'])
 
-# ✅ Ensure Excel exists
+# Excel file to save data
 EXCEL_FILE = "postnl_report.xlsx"
+
+# Initialize Excel if not exists
 if not os.path.exists(EXCEL_FILE):
-    pd.DataFrame(columns=["Type", "Category", "Day", "Count"]).to_excel(EXCEL_FILE, index=False)
+    df = pd.DataFrame(columns=["Type", "Category", "Day", "Count"])
+    df.to_excel(EXCEL_FILE, index=False)
 
-# ✅ Preprocess image for OCR
-def preprocess_image(image):
-    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 11, 17, 17)
-    return gray
+# =============================
+# 2. FUNCTIONS
+# =============================
 
-# ✅ Detect day based on color cards
-def detect_day_from_color(image):
-    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    avg_color = img.mean(axis=(0, 1))[::-1]  # RGB
-    closest_day, min_dist = "Unknown", float("inf")
-    for day, color in DAY_COLORS.items():
-        dist = np.linalg.norm(np.array(avg_color) - np.array(color))
-        if dist < min_dist:
-            closest_day, min_dist = day, dist
-    return closest_day
-
-# ✅ Extract text for category detection
-def extract_category_text(image):
-    processed = preprocess_image(image)
-    results = reader.readtext(processed, detail=0)
-    text_upper = " ".join(results).upper()
-    found_category = next((c for c in CATEGORIES if c in text_upper), "Unknown")
-    return found_category
-
-# ✅ Detect carts visually using YOLOv8
 def detect_carts(image):
-    img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    results = model.predict(img_bgr, verbose=False)
-    count = len(results[0].boxes) if results and len(results[0].boxes) else 0
+    """Detect carts using YOLOv8 and return total count."""
+    results = model.predict(image, conf=0.3, verbose=False)
+    count = 0
+    for r in results:
+        for box in r.boxes:
+            count += 1
     return count
 
-# ✅ Append new data to Excel
-def update_excel(new_data):
+def extract_text_category(image):
+    """Extract category text using EasyOCR."""
+    img_array = np.array(image)
+    results = reader.readtext(img_array)
+    text_results = [res[1] for res in results]
+    
+    category = "-"
+    type_detected = "Unknown"
+    
+    # Match against known words
+    known_types = ["Gerichte", "HAGA", "HAGB", "HAGE", "Gateway", "Spring", "PNLI", "Belbaan"]
+    for t in known_types:
+        if any(t.lower() in tx.lower() for tx in text_results):
+            type_detected = t
+            category = t
+            break
+    
+    return type_detected, category
+
+def save_to_excel(type_detected, category, day, count):
+    """Append detection result to the Excel file."""
     df = pd.read_excel(EXCEL_FILE)
-    df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+    new_row = {"Type": type_detected, "Category": category, "Day": day, "Count": count}
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     df.to_excel(EXCEL_FILE, index=False)
-    return df
 
-# ✅ Streamlit App UI
-st.set_page_config(page_title="PostNL Cart Tracker", layout="wide")
-st.title("📦 PostNL Cart Tracker (Full Automated Version)")
+# =============================
+# 3. STREAMLIT INTERFACE
+# =============================
 
-st.markdown("""
-✅ **Fully Automated Version**  
-- Detects **carts visually with AI (YOLOv8)**  
-- Extracts **Category via OCR**  
-- Detects **Day automatically by color**  
-- Saves to Excel **incrementally after each photo**  
-""")
+st.set_page_config(page_title="PostNL Cart Scanner", layout="wide")
+st.title("📦 PostNL Cart Scanner - Automated Counting")
 
-uploaded_files = st.file_uploader("Upload cart photos:", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_file = st.file_uploader("Upload a photo of carts", type=["jpg", "jpeg", "png"])
 
-if uploaded_files:
-    for file in uploaded_files:
-        image = Image.open(file)
+day_options = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-        # Run detections
-        detected_day = detect_day_from_color(image)
-        detected_category = extract_category_text(image)
-        cart_count = detect_carts(image)
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-        # Determine Type based on category
-        t_type = "Gerichte Landen" if detected_category in ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC"] else "Mixed Post"
+    selected_day = st.selectbox("Select day (auto selection coming soon)", day_options)
 
-        # Save & update Excel
-        new_entry = {"Type": t_type, "Category": detected_category, "Day": detected_day, "Count": cart_count}
-        df = update_excel(new_entry)
+    if st.button("🔍 Analyze Photo"):
+        with st.spinner("Analyzing... please wait"):
+            cart_count = detect_carts(image)
+            type_detected, category = extract_text_category(image)
+            save_to_excel(type_detected, category, selected_day, cart_count)
+        
+        st.success(f"✅ Detected: {cart_count} carts | Type: {type_detected} | Day: {selected_day}")
+        st.dataframe(pd.read_excel(EXCEL_FILE))
 
-        # Display results
-        st.subheader(f"Results for {file.name}")
-        st.image(image, caption=f"Detected Day: {detected_day} | Count: {cart_count}", use_column_width=True)
-        st.dataframe(df.tail(10), use_container_width=True)
-
-    # Download updated Excel
-    with open(EXCEL_FILE, "rb") as f:
-        st.download_button("⬇️ Download Updated Excel Report", f, file_name=EXCEL_FILE, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    st.success("✅ Report updated and saved successfully!")
+        with open(EXCEL_FILE, "rb") as f:
+            st.download_button("⬇ Download Updated Excel", f, file_name=EXCEL_FILE)
