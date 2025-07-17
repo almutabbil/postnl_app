@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import cv2
@@ -6,17 +7,23 @@ from PIL import Image
 from io import BytesIO
 import easyocr
 
-# ✅ Streamlit Page Setup
+# ✅ Fix for EasyOCR on Streamlit Cloud (forces model to download in /tmp)
+os.environ["TORCH_HOME"] = "/tmp/torch"
+
+# ✅ Initialize EasyOCR reader (English only for faster processing)
+reader = easyocr.Reader(['en'], gpu=False)
+
+# ✅ Streamlit Page Configuration
 st.set_page_config(page_title="PostNL Cart Tracker", layout="wide")
 st.title("📦 PostNL Cart Tracker (Cloud-Optimized Version)")
-st.write("✅ App loaded successfully. Upload images to begin.")
 
-# ✅ Cache EasyOCR to prevent repeated initialization
-@st.cache_resource
-def load_ocr_reader():
-    return easyocr.Reader(['en'], gpu=False)
-
-reader = load_ocr_reader()
+st.markdown("""
+✅ **Cloud-Optimized Version**  
+- Works on **Streamlit Cloud & iPhone**  
+- Detects **multiple carts per photo**  
+- Improved **day color detection**  
+- **EasyOCR optimized** (no Tesseract needed)
+""")
 
 # ✅ Day Color Mapping
 DAY_COLORS = {
@@ -29,19 +36,26 @@ DAY_COLORS = {
     "Saturday": (255, 165, 0)
 }
 
-# ✅ Functions
+# ✅ Preprocessing (Cloud Safe & Memory Optimized)
 def preprocess_image(image):
-    """Resize, grayscale, and sharpen image for better OCR."""
+    """Resize, grayscale, and sharpen image for better OCR (Cloud Safe)."""
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    img = cv2.resize(img, (0, 0), fx=1.5, fy=1.5)
+
+    # Resize if too large (Streamlit Cloud memory-safe)
+    max_dim = 1200
+    if img.shape[0] > max_dim or img.shape[1] > max_dim:
+        scaling_factor = max_dim / max(img.shape[0], img.shape[1])
+        img = cv2.resize(img, (int(img.shape[1] * scaling_factor), int(img.shape[0] * scaling_factor)))
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.bilateralFilter(gray, 11, 17, 17)
     return gray
 
+# ✅ Detect Day Based on Average Color
 def detect_day_from_color(image):
-    """Improved day detection based on color averaging."""
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    avg_color = img.mean(axis=(0, 1))[::-1]  # RGB
+    avg_color = img.mean(axis=(0, 1))[::-1]  # Convert BGR → RGB
+
     closest_day, min_dist = None, float("inf")
     for day, color in DAY_COLORS.items():
         dist = np.linalg.norm(np.array(avg_color) - np.array(color))
@@ -49,14 +63,14 @@ def detect_day_from_color(image):
             closest_day, min_dist = day, dist
     return closest_day
 
+# ✅ OCR Extraction with EasyOCR
 def extract_text_easyocr(image):
-    """Extract text using EasyOCR with preprocessing."""
     processed = preprocess_image(image)
     results = reader.readtext(processed, detail=0)
     return " ".join(results).upper()
 
+# ✅ Type & Category Parsing
 def parse_type_category(text):
-    """Extract Type & Category from OCR text."""
     if "MIX" in text:
         t_type = "Mixed Post"
     elif "LIST" in text:
@@ -68,14 +82,14 @@ def parse_type_category(text):
     t_category = next((c for c in categories if c in text), "-")
     return t_type, t_category
 
+# ✅ Convert DataFrame to Excel
 def convert_df_to_excel(dataframe):
-    """Export DataFrame to Excel (auto-download)."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         dataframe.to_excel(writer, index=False, sheet_name="Cart Summary")
     return output.getvalue()
 
-# ✅ Main App Logic
+# ✅ File Upload & Processing
 uploaded_files = st.file_uploader("Upload cart photos:", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 results = []
 
@@ -109,5 +123,3 @@ if uploaded_files:
     )
 
     st.success("✅ Report ready!")
-else:
-    st.info("👆 Upload one or more cart photos to start OCR processing.")
