@@ -1,5 +1,5 @@
 import streamlit as st
-import cv2
+
 import torch
 import easyocr
 import numpy as np
@@ -7,7 +7,8 @@ import pandas as pd
 from PIL import Image
 from ultralytics import YOLO
 import os
-
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"  # prevents DLL issues on cloud
+import cv2
 # ================================
 # ✅ Initialize YOLO and EasyOCR
 # ================================
