@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 import pandas as pd
 import cv2
@@ -6,26 +5,24 @@ import numpy as np
 from PIL import Image
 from io import BytesIO
 import easyocr
+import re
 
-# ✅ Fix for EasyOCR on Streamlit Cloud (forces model to download in /tmp)
-os.environ["TORCH_HOME"] = "/tmp/torch"
-
-# ✅ Initialize EasyOCR reader (English only for faster processing)
+# ✅ Initialize EasyOCR (English only, GPU off for Streamlit Cloud)
 reader = easyocr.Reader(['en'], gpu=False)
 
-# ✅ Streamlit Page Configuration
 st.set_page_config(page_title="PostNL Cart Tracker", layout="wide")
-st.title("📦 PostNL Cart Tracker (Cloud-Optimized Version)")
+st.title("📦 PostNL Cart Tracker (Improved Version)")
 
 st.markdown("""
-✅ **Cloud-Optimized Version**  
-- Works on **Streamlit Cloud & iPhone**  
-- Detects **multiple carts per photo**  
-- Improved **day color detection**  
-- **EasyOCR optimized** (no Tesseract needed)
+✅ **Improved Version**  
+- Detects **multiple carts per photo**.  
+- Correct **category detection** (HAGA, HAGB, HAGE, SMO, BIMIC).  
+- Accurate **cart counting** per category.  
+- Shows **debug image with detected tags**.  
+- Outputs table in **official format** (Type, Category, Day, Count).  
 """)
 
-# ✅ Day Color Mapping
+# ✅ Day Colors for Reference (can be improved if needed)
 DAY_COLORS = {
     "Sunday": (150, 75, 0),
     "Monday": (0, 128, 0),
@@ -36,26 +33,18 @@ DAY_COLORS = {
     "Saturday": (255, 165, 0)
 }
 
-# ✅ Preprocessing (Cloud Safe & Memory Optimized)
+# ✅ Categories & Type Matching
+CATEGORIES = ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC"]
+
 def preprocess_image(image):
-    """Resize, grayscale, and sharpen image for better OCR (Cloud Safe)."""
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-    # Resize if too large (Streamlit Cloud memory-safe)
-    max_dim = 1200
-    if img.shape[0] > max_dim or img.shape[1] > max_dim:
-        scaling_factor = max_dim / max(img.shape[0], img.shape[1])
-        img = cv2.resize(img, (int(img.shape[1] * scaling_factor), int(img.shape[0] * scaling_factor)))
-
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.bilateralFilter(gray, 11, 17, 17)
     return gray
 
-# ✅ Detect Day Based on Average Color
 def detect_day_from_color(image):
     img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    avg_color = img.mean(axis=(0, 1))[::-1]  # Convert BGR → RGB
-
+    avg_color = img.mean(axis=(0, 1))[::-1]
     closest_day, min_dist = None, float("inf")
     for day, color in DAY_COLORS.items():
         dist = np.linalg.norm(np.array(avg_color) - np.array(color))
@@ -63,42 +52,44 @@ def detect_day_from_color(image):
             closest_day, min_dist = day, dist
     return closest_day
 
-# ✅ OCR Extraction with EasyOCR
-def extract_text_easyocr(image):
+def analyze_carts(image):
+    """Detect multiple carts and extract their categories"""
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     processed = preprocess_image(image)
-    results = reader.readtext(processed, detail=0)
-    return " ".join(results).upper()
 
-# ✅ Type & Category Parsing
-def parse_type_category(text):
-    if "MIX" in text:
-        t_type = "Mixed Post"
-    elif "LIST" in text:
-        t_type = "List " + "".join(filter(str.isdigit, text))
-    else:
-        t_type = "Gerichte Landen"
+    results = reader.readtext(processed, detail=1)
+    category_counts = {cat: 0 for cat in CATEGORIES}
+    debug_img = img.copy()
 
-    categories = ["HAGA", "HAGB", "HAGE", "SMO", "BIMIC"]
-    t_category = next((c for c in categories if c in text), "-")
-    return t_type, t_category
+    for (bbox, text, conf) in results:
+        text_upper = text.upper()
 
-# ✅ Convert DataFrame to Excel
+        # Draw bounding boxes for debugging
+        pts = np.array(bbox, dtype=np.int32)
+        cv2.polylines(debug_img, [pts], True, (0, 255, 0), 2)
+
+        # Check for category keywords
+        for cat in CATEGORIES:
+            if cat in text_upper:
+                category_counts[cat] += 1
+                cv2.putText(debug_img, cat, (int(bbox[0][0]), int(bbox[0][1]) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    return category_counts, debug_img
+
 def convert_df_to_excel(dataframe):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         dataframe.to_excel(writer, index=False, sheet_name="Cart Summary")
     return output.getvalue()
 
-# ✅ File Upload & Processing
 uploaded_files = st.file_uploader("Upload cart photos:", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 results = []
 
 if uploaded_files:
     for file in uploaded_files:
         image = Image.open(file)
-        ocr_text = extract_text_easyocr(image)
         detected_day = detect_day_from_color(image)
-        t_type, t_category = parse_type_category(ocr_text)
 
         manual_day = st.selectbox(
             f"Select Day for {file.name} (detected: {detected_day})",
@@ -107,19 +98,34 @@ if uploaded_files:
             key=file.name
         )
 
-        results.append({"Type": t_type, "Category": t_category, "Day": manual_day, "Count": 1})
+        category_counts, debug_img = analyze_carts(image)
 
-    df = pd.DataFrame(results).groupby(["Type", "Category", "Day"], as_index=False)["Count"].sum()
+        # Display debug image
+        st.image(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB),
+                 caption=f"Detected Carts for {file.name}", use_column_width=True)
 
-    st.subheader("📊 Cart Summary Table")
-    st.dataframe(df, use_container_width=True)
+        for cat, count in category_counts.items():
+            if count > 0:
+                results.append({
+                    "Type": "Gerichte Landen",
+                    "Category": cat,
+                    "Day": manual_day,
+                    "Count": count
+                })
 
-    excel_data = convert_df_to_excel(df)
-    st.download_button(
-        label="⬇️ Download Excel Report",
-        data=excel_data,
-        file_name="postnl_cart_summary.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    if results:
+        df = pd.DataFrame(results)
+        st.subheader("📊 Cart Summary Table")
+        st.dataframe(df, use_container_width=True)
 
-    st.success("✅ Report ready!")
+        excel_data = convert_df_to_excel(df)
+        st.download_button(
+            label="⬇️ Download Excel Report",
+            data=excel_data,
+            file_name="postnl_cart_summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.success("✅ Report ready!")
+    else:
+        st.warning("No carts detected! Check image quality or tag visibility.")
